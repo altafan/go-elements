@@ -1,6 +1,7 @@
 package transaction
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"math"
@@ -33,6 +34,11 @@ type TxIssuance struct {
 	TokenAmount        []byte
 }
 
+// IsReissuance returns whether the issuance is an asset re-issuance
+func (issuance *TxIssuance) IsReissuance() bool {
+	return !bytes.Equal(issuance.AssetBlindingNonce, Zero[:])
+}
+
 // TxIssuanceExtended adds fields to the issuance type that are not encoded in
 // the transaction
 type TxIssuanceExtended struct {
@@ -41,9 +47,17 @@ type TxIssuanceExtended struct {
 	ContractHash []byte
 }
 
-// NewTxIssuance returns a new issuance instance from contract hash
+// NewTxIssuanceFromContractHash returns a new issuance instance from contract hash
 func NewTxIssuanceFromContractHash(contractHash []byte) *TxIssuanceExtended {
 	return &TxIssuanceExtended{ContractHash: contractHash}
+}
+
+// NewTxIssuanceFromEntropy returns a new issuance instance from entropy
+func NewTxIssuanceFromEntropy(entropy []byte) *TxIssuanceExtended {
+	issuance := &TxIssuanceExtended{
+		TxIssuance: TxIssuance{AssetEntropy: entropy},
+	}
+	return issuance
 }
 
 // NewTxIssuance returns a new issuance instance
