@@ -76,7 +76,7 @@ func NewTxInput(hash []byte, index uint32) *TxInput {
 // transaction input.
 func (in *TxInput) SerializeSize() int {
 	size := 40 + bufferutil.VarSliceSerializeSize(in.Script)
-	if in.HasIssuance() {
+	if in.HasIssuance() || in.HasReissuance() {
 		size += 64 + len(in.Issuance.AssetAmount) + len(in.Issuance.TokenAmount)
 	}
 	return size
@@ -84,7 +84,12 @@ func (in *TxInput) SerializeSize() int {
 
 // HasIssuance returns whether the input contains an issuance
 func (in *TxInput) HasIssuance() bool {
-	return in.Issuance != nil
+	return in.Issuance != nil && !in.Issuance.IsReissuance()
+}
+
+// HasReissuance returns whether the input contains a re-issuance
+func (in *TxInput) HasReissuance() bool {
+	return in.Issuance != nil && in.Issuance.IsReissuance()
 }
 
 // TxWitness defines the witness for a TxIn. A witness is to be interpreted as
@@ -370,6 +375,22 @@ func (tx *Transaction) CountIssuances() int {
 	return count
 }
 
+// CountReissuances returns the number of inputs containing a re-issuance
+func (tx *Transaction) CountReissuances() int {
+	if len(tx.Inputs) == 0 {
+		return 0
+	}
+
+	count := 0
+	for _, in := range tx.Inputs {
+		if in.HasReissuance() {
+			count++
+		}
+	}
+
+	return count
+}
+
 // Weight returns the total weight in bytes of the transaction
 func (tx *Transaction) Weight() int {
 	base := tx.SerializeSize(false, false)
@@ -431,7 +452,7 @@ func (tx *Transaction) Copy() *Transaction {
 		if len(input.InflationRangeProof) != 0 {
 			newInput.InflationRangeProof = copyBytes(input.InflationRangeProof)
 		}
-		if input.HasIssuance() {
+		if input.HasIssuance() || input.HasReissuance() {
 			newInput.Issuance = &TxIssuance{
 				AssetAmount:        copyBytes(input.Issuance.AssetAmount),
 				AssetEntropy:       copyBytes(input.Issuance.AssetEntropy),
@@ -611,7 +632,7 @@ func (tx *Transaction) HashForWitnessV0(inIndex int, prevoutScript []byte, value
 	s.WriteVarSlice(prevoutScript)
 	s.WriteSlice(value)
 	s.WriteUint32(input.Sequence)
-	if input.HasIssuance() {
+	if input.HasIssuance() || input.HasReissuance() {
 		s.WriteSlice(input.Issuance.AssetBlindingNonce)
 		s.WriteSlice(input.Issuance.AssetEntropy)
 		s.WriteSlice(input.Issuance.AssetAmount)
@@ -771,7 +792,7 @@ func calcTxSequencesHash(ins []*TxInput) [32]byte {
 func calcTxIssuancesHash(ins []*TxInput) [32]byte {
 	s, _ := bufferutil.NewSerializer(nil)
 	for _, in := range ins {
-		if in.HasIssuance() {
+		if in.HasIssuance() || in.HasReissuance() {
 			s.WriteSlice(in.Issuance.AssetBlindingNonce)
 			s.WriteSlice(in.Issuance.AssetEntropy)
 			s.WriteSlice(in.Issuance.AssetAmount)
