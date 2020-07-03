@@ -13,12 +13,16 @@ package pset
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"math"
 
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/psbt"
 	"github.com/vulpemventures/go-elements/address"
+	"github.com/vulpemventures/go-elements/confidential"
+	"github.com/vulpemventures/go-elements/internal/bufferutil"
 	"github.com/vulpemventures/go-elements/network"
 	"github.com/vulpemventures/go-elements/transaction"
 )
@@ -496,6 +500,177 @@ func (p *Updater) AddIssuance(arg AddIssuanceArg) error {
 			script,
 		)
 		p.AddOutput(output)
+	}
+
+	return nil
+}
+
+// AddReissuanceArg defines the mandatory fields that one needs to pass to
+// the AddReissuance method of the *Updater type
+// 		InputHash: the prevout hash of the token that will be added as input to the tx
+//		InputIndex: the prevout index of the token that will be added as input to the tx
+//		InputBlinder: the asset blinder used to blind the prevout token
+//		Entropy: the entropy used to generate token and asset
+//		AssetAmount: the amount of asset to re-issue
+//		TokenAmount: the same unblinded amount of the prevout token
+//		AssetAddress: the destination address for the re-issued asset amount
+//		WitnessUtxo: the prevout token output in case it is a witness one
+//		NonWitnessUtxo: the prevout tx that include the token output in case it is a non witness one
+//		Network: whether Liquid or Regtest, defaults to Liquid then not defined
+type AddReissuanceArg struct {
+	InputHash      string
+	InputIndex     uint32
+	InputBlinder   []byte
+	Entropy        string
+	AssetAmount    float64
+	TokenAmount    float64
+	AssetAddress   string
+	WitnessUtxo    *transaction.TxOutput
+	NonWitnessUtxo *transaction.Transaction
+	Network        *network.Network
+}
+
+func (arg AddReissuanceArg) validate() error {
+	if arg.WitnessUtxo == nil && arg.NonWitnessUtxo == nil {
+		return errors.New("either WitnessUtxo or NonWitnessUtxo must be defined")
+	}
+	if len(arg.InputHash)/2 != 32 {
+		return errors.New("invalid input hash")
+	}
+	if len(arg.InputBlinder) != 32 {
+		return errors.New("invalid input blinder")
+	}
+	if len(arg.AssetAddress) == 0 {
+		return errors.New("invalid destination address")
+	}
+	if len(arg.Entropy) == 0 {
+		return errors.New("invalid asset entropy")
+	}
+	if arg.AssetAmount <= 0 {
+		return errors.New("invalid asset amount")
+	}
+	if arg.TokenAmount <= 0 {
+		return errors.New("invalid token amount")
+	}
+	_, err := hex.DecodeString(arg.InputHash)
+	if err != nil {
+		return err
+	}
+	_, err = hex.DecodeString(arg.Entropy)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// AddReissuance takes care of adding an input (the prevout token) and 2
+// outputs to the partial transaction. It also creates a new (re)issuance with
+// the provided entropy, blinder and amounts and attaches it to the new input.
+// NOTE: This transaction must be blinded later so that a new token blinding
+// nonce is generated for the new token output
+func (p *Updater) AddReissuance(arg AddReissuanceArg) error {
+	err := arg.validate()
+	if err != nil {
+		return errors.New("bad arguments: " + err.Error())
+	}
+
+	if len(p.Data.Inputs) == 0 {
+		return errors.New(
+			"transaction must contain at least one input before adding a reissuance",
+		)
+	}
+
+	inputHash, _ := hex.DecodeString(arg.InputHash)
+	entropy, _ := hex.DecodeString(arg.Entropy)
+
+	inputHash = bufferutil.ReverseBytes(inputHash)
+	entropy = bufferutil.ReverseBytes(entropy)
+
+	var net *network.Network
+	if arg.Network == nil {
+		net = &network.Liquid
+	} else {
+		net = arg.Network
+	}
+
+	assetScript, err := address.ToOutputScript(arg.AssetAddress, *net)
+	if err != nil {
+		return err
+	}
+
+	// we must ensure that the prevout token is confidential, otherwise the
+	// reissuance cannot be made
+	prevout := &transaction.TxOutput{}
+	if arg.WitnessUtxo != nil {
+		*prevout = *arg.WitnessUtxo
+	} else {
+		*prevout = *arg.NonWitnessUtxo.Outputs[arg.InputIndex]
+	}
+
+	if !prevout.IsConfidential() {
+		return errors.New(
+			"token input must be confidential. You have to create a new blinded " +
+				"token output in order to be able to use it for reissuing the " +
+				"relative asset",
+		)
+	}
+
+	// generate token and asset from provided entropy
+	issuance := transaction.NewTxIssuanceFromEntropy(entropy)
+	assetHash, err := issuance.GenerateAsset()
+	if err != nil {
+		return err
+	}
+	tokenHash, err := issuance.GenerateReissuanceToken(
+		ConfidentialReissuanceTokenFlag,
+	)
+	if err != nil {
+		return err
+	}
+	// prepend assets with unconf prefix
+	assetHash = append([]byte{0x01}, assetHash...)
+	tokenHash = append([]byte{0x01}, tokenHash...)
+
+	// add input
+	tokenInput := transaction.NewTxInput(inputHash, arg.InputIndex)
+	p.AddInput(tokenInput)
+	inputIndex := len(p.Data.Inputs) - 1
+	if arg.WitnessUtxo != nil {
+		p.AddInWitnessUtxo(arg.WitnessUtxo, inputIndex)
+	} else {
+		p.AddInNonWitnessUtxo(arg.NonWitnessUtxo, inputIndex)
+	}
+
+	reissuanceAmount, _ := confidential.SatoshiToElementsValue(
+		uint64(arg.AssetAmount * math.Pow10(8)),
+	)
+	tokenAmount, _ := confidential.SatoshiToElementsValue(
+		uint64(arg.TokenAmount * math.Pow10(8)),
+	)
+
+	// add outputs
+	reissuanceOutput := transaction.NewTxOutput(
+		assetHash,
+		reissuanceAmount[:],
+		assetScript,
+	)
+	p.AddOutput(reissuanceOutput)
+
+	// and the token output
+	tokenOutput := transaction.NewTxOutput(
+		tokenHash,
+		tokenAmount[:],
+		prevout.Script,
+	)
+	p.AddOutput(tokenOutput)
+
+	// add the (re)issuance to the token input
+	p.Data.UnsignedTx.Inputs[inputIndex].Issuance = &transaction.TxIssuance{
+		AssetBlindingNonce: arg.InputBlinder,
+		TokenAmount:        []byte{0x00},
+		AssetAmount:        reissuanceAmount[:],
+		AssetEntropy:       issuance.TxIssuance.AssetEntropy,
 	}
 
 	return nil
