@@ -178,9 +178,8 @@ func (b *blinder) unblindInputs() (
 
 		// if the current input contains an issuance, add the pseudo input to the
 		// returned unblindedPseudoIns array
-		if input.HasIssuance() {
-			issuance := transaction.NewTxIssuanceFromContractHash(input.Issuance.AssetEntropy)
-			issuance.GenerateEntropy(input.Hash, input.Index)
+		if input.HasIssuance() || input.HasReissuance() {
+			issuance := calcIssuance(input)
 			asset, err := issuance.GenerateAsset()
 			if err != nil {
 				return nil, nil, err
@@ -211,8 +210,9 @@ func (b *blinder) unblindInputs() (
 
 			// if the token amount is not defined, it is set to 0x00, thus we need
 			// to check if the input.Issuance.TokenAmount, that is encoded in the
-			// elements format, contains more than one byte
-			if len(input.Issuance.TokenAmount) > 1 {
+			// elements format, contains more than one byte.
+			// We simply ignore the token amount for reissuances.
+			if !input.Issuance.IsReissuance() && len(input.Issuance.TokenAmount) > 1 {
 				tokenAmount := [9]byte{}
 				copy(tokenAmount[:], input.Issuance.TokenAmount)
 				value, err := confidential.ElementsToSatoshiValue(tokenAmount)
@@ -324,7 +324,7 @@ func (b *blinder) blindInputs(unblinded []confidential.UnblindOutputResult) erro
 
 	getBlindingFactors := func(asset []byte) ([]byte, []byte, error) {
 		for _, u := range unblinded {
-			if bytes.Compare(asset, u.Asset) == 0 {
+			if bytes.Equal(asset, u.Asset) {
 				return u.ValueBlindingFactor, u.AssetBlindingFactor, nil
 			}
 		}
@@ -332,15 +332,9 @@ func (b *blinder) blindInputs(unblinded []confidential.UnblindOutputResult) erro
 	}
 
 	for index, input := range b.pset.UnsignedTx.Inputs {
-		if input.HasIssuance() {
-			issuance := transaction.NewTxIssuanceFromContractHash(
-				input.Issuance.AssetEntropy,
-			)
+		if input.HasIssuance() || input.HasReissuance() {
+			issuance := calcIssuance(input)
 
-			err := issuance.GenerateEntropy(input.Hash, input.Index)
-			if err != nil {
-				return err
-			}
 			asset, err := issuance.GenerateAsset()
 			if err != nil {
 				return err
@@ -356,10 +350,12 @@ func (b *blinder) blindInputs(unblinded []confidential.UnblindOutputResult) erro
 				return err
 			}
 
-			// if the token amount is not defined, it is set to 0x00, thus we need
-			// to check if the input.Issuance.TokenAmount, that is encoded in the
-			// elements format, contains more than one byte
-			if len(input.Issuance.TokenAmount) > 1 {
+			// ONLY in case the issuance is a new asset issuance, if the token amount
+			// is not defined, it is set to 0x00, thus we need to check if the
+			// input.Issuance.TokenAmount, that is encoded in the elements format,
+			// contains more than one byte. Reissuances, instead, simply cannot have
+			// a token amount defined in the issuance.
+			if !input.Issuance.IsReissuance() && len(input.Issuance.TokenAmount) > 1 {
 				token, err := issuance.GenerateReissuanceToken(
 					ConfidentialReissuanceTokenFlag,
 				)
@@ -656,6 +652,15 @@ func (b *blinder) blindToken(index int, token, vbf, abf []byte) error {
 	b.pset.UnsignedTx.Inputs[index].InflationRangeProof = rangeProof
 	b.pset.UnsignedTx.Inputs[index].Issuance.TokenAmount = valueCommitment[:]
 	return nil
+}
+
+func calcIssuance(input *transaction.TxInput) *transaction.TxIssuanceExtended {
+	if input.Issuance.IsReissuance() {
+		return transaction.NewTxIssuanceFromEntropy(input.Issuance.AssetEntropy)
+	}
+	issuance := transaction.NewTxIssuanceFromContractHash(input.Issuance.AssetEntropy)
+	issuance.GenerateEntropy(input.Hash, input.Index)
+	return issuance
 }
 
 func generateRandomNumber() ([]byte, error) {
