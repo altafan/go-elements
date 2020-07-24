@@ -77,7 +77,8 @@ func NewTxInput(hash []byte, index uint32) *TxInput {
 func (in *TxInput) SerializeSize() int {
 	size := 40 + bufferutil.VarSliceSerializeSize(in.Script)
 	if in.HasIssuance() {
-		size += 64 + len(in.Issuance.AssetAmount) + len(in.Issuance.TokenAmount)
+		proofLen := (len(in.IssuanceRangeProof) + len(in.InflationRangeProof)) / 4
+		size += 64 + len(in.Issuance.AssetAmount) + len(in.Issuance.TokenAmount) + proofLen
 	}
 	return size
 }
@@ -120,7 +121,12 @@ func NewTxOutput(asset, value, script []byte) *TxOutput {
 // SerializeSize returns the number of bytes it would take to serialize the the
 // transaction output.
 func (out *TxOutput) SerializeSize() int {
-	return len(out.Asset) + len(out.Value) + len(out.Nonce) + bufferutil.VarSliceSerializeSize(out.Script)
+	proofLen := (len(out.RangeProof) + len(out.SurjectionProof)) / 4
+	return len(out.Asset) +
+		len(out.Value) +
+		len(out.Nonce) +
+		bufferutil.VarSliceSerializeSize(out.Script) +
+		proofLen
 }
 
 // IsConfidential returns whether the output is a confidential one
