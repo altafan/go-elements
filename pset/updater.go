@@ -15,7 +15,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"math"
 
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcutil"
@@ -522,8 +521,8 @@ type AddReissuanceArg struct {
 	InputIndex     uint32
 	InputBlinder   []byte
 	Entropy        string
-	AssetAmount    float64
-	TokenAmount    float64
+	AssetAmount    uint64
+	TokenAmount    uint64
 	AssetAddress   string
 	WitnessUtxo    *transaction.TxOutput
 	NonWitnessUtxo *transaction.Transaction
@@ -643,10 +642,10 @@ func (p *Updater) AddReissuance(arg AddReissuanceArg) error {
 	}
 
 	reissuanceAmount, _ := confidential.SatoshiToElementsValue(
-		uint64(arg.AssetAmount * math.Pow10(8)),
+		uint64(arg.AssetAmount),
 	)
 	tokenAmount, _ := confidential.SatoshiToElementsValue(
-		uint64(arg.TokenAmount * math.Pow10(8)),
+		uint64(arg.TokenAmount),
 	)
 
 	// add outputs
