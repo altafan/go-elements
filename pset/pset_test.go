@@ -1676,6 +1676,441 @@ func TestBroadcastBlindedIssuanceTx(t *testing.T) {
 	}
 }
 
+func TestBroadcastBlindedReIssuanceTx(t *testing.T) {
+	/**
+	* This test attempts to broadcast a confidential issuance transaction
+	* and then a reissuance transaction composed by 2 confidential P2wWPKH inputs
+	* and 3 confidential P2WPKH outputs. The outputs will be a confidetial p2wpkh
+	* for both the reissued asset and the relative reissunce token, and another
+	* confidential p2wpkh for the change for paying the network fees. A 4th
+	* unblinded output is for the fees, with empty script.
+	**/
+
+	privkey, err := btcec.NewPrivateKey(btcec.S256())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubkey := privkey.PubKey()
+	// pkBytes, _ := hex.DecodeString("9db59480144af0a436a27cb948aec38ec9e2ebfebbe076bfac4c194bb654664c")
+	// privkey, pubkey := btcec.PrivKeyFromBytes(btcec.S256(), pkBytes)
+	p2wpkh := payment.FromPublicKey(pubkey, &network.Regtest, nil)
+	address, _ := p2wpkh.WitnessPubKeyHash()
+
+	// Fund sender address.
+	_, err = faucet(address)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Retrieve sender utxos.
+	utxosForIssuanceTx, err := unspents(address)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The transaction will have 1 input and 2 outputs.
+	txInputHashForIssuanceTx, _ := hex.DecodeString(
+		utxosForIssuanceTx[0]["txid"].(string),
+	)
+	txInputHashForIssuanceTx = bufferutil.ReverseBytes(txInputHashForIssuanceTx)
+	txInputIndexForIssuanceTx := uint32(utxosForIssuanceTx[0]["vout"].(float64))
+	txInputForIssuanceTx := transaction.NewTxInput(
+		txInputHashForIssuanceTx,
+		txInputIndexForIssuanceTx,
+	)
+
+	lbtc, _ := hex.DecodeString(
+		"5ac9f65c0efcc4775e0baec4ec03abdde22473cd3cf33c0419ca290e0751b225",
+	)
+	lbtc = append([]byte{0x01}, bufferutil.ReverseBytes(lbtc)...)
+
+	// Create a new pset.
+	inputsForIssuanceTx := []*transaction.TxInput{txInputForIssuanceTx}
+	outputsForIssuanceTx := []*transaction.TxOutput{}
+	issuancePset, err := New(inputsForIssuanceTx, outputsForIssuanceTx, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updater, err := NewUpdater(issuancePset)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	arg := AddIssuanceArg{
+		Precision:    8,
+		AssetAmount:  2000,
+		TokenAmount:  1,
+		AssetAddress: address,
+		TokenAddress: address,
+		TokenFlag:    1,
+		Net:          network.Regtest,
+	}
+	err = updater.AddIssuance(arg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = updater.AddInSighashType(txscript.SigHashAll, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valueForIssuanceTx, _ := confidential.SatoshiToElementsValue(
+		uint64(utxosForIssuanceTx[0]["value"].(float64)),
+	)
+	witnessUtxoForIssuanceTx := transaction.NewTxOutput(
+		lbtc,
+		valueForIssuanceTx[:],
+		p2wpkh.WitnessScript,
+	)
+	err = updater.AddInWitnessUtxo(witnessUtxoForIssuanceTx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add change and fees
+	changeScriptForIssuanceTx := p2wpkh.WitnessScript
+	changeValueForIssuanceTx, _ := confidential.SatoshiToElementsValue(99996000)
+	changeOutputForIssuanceTx := transaction.NewTxOutput(
+		lbtc,
+		changeValueForIssuanceTx[:],
+		changeScriptForIssuanceTx,
+	)
+	updater.AddOutput(changeOutputForIssuanceTx)
+
+	//blind outputs
+	blindingPrivKeysForIssuanceTx := [][]byte{{}}
+	blindingPubKeysForIssuanceTx := make([][]byte, 0)
+
+	pk, err := btcec.NewPrivateKey(btcec.S256())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// blinding pubkey for asset output
+	blindingpubkey := pk.PubKey().SerializeCompressed()
+	blindingPubKeysForIssuanceTx = append(
+		blindingPubKeysForIssuanceTx,
+		blindingpubkey,
+	)
+
+	// blinding pubkey for token output
+	blindingPubKeysForIssuanceTx = append(
+		blindingPubKeysForIssuanceTx,
+		blindingpubkey,
+	)
+
+	// blinding pubkey for change output
+	pk1, err := btcec.NewPrivateKey(btcec.S256())
+	if err != nil {
+		t.Fatal(err)
+	}
+	blindingpubkey1 := pk1.PubKey().SerializeCompressed()
+	blindingPubKeysForIssuanceTx = append(
+		blindingPubKeysForIssuanceTx,
+		blindingpubkey1,
+	)
+
+	issuanceBlindingPrivateKeys := make([]IssuanceBlindingPrivateKeys, 0)
+	issuanceBlindingPrivateKeys = append(
+		issuanceBlindingPrivateKeys,
+		IssuanceBlindingPrivateKeys{
+			AssetKey: pk.Serialize(),
+			TokenKey: pk1.Serialize(),
+		},
+	)
+
+	blinder, err := NewBlinder(
+		issuancePset,
+		blindingPrivKeysForIssuanceTx,
+		blindingPubKeysForIssuanceTx,
+		issuanceBlindingPrivateKeys,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = blinder.Blind()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	feeScript := []byte{}
+	feeValueForIssuanceTx, _ := confidential.SatoshiToElementsValue(4000)
+	feeOutputForIssuanceTx := transaction.NewTxOutput(
+		lbtc,
+		feeValueForIssuanceTx[:],
+		feeScript,
+	)
+	updater.AddOutput(feeOutputForIssuanceTx)
+
+	sigHashForIssuanceTx := updater.Data.UnsignedTx.HashForWitnessV0(
+		0,
+		p2wpkh.Script,
+		[]byte{0x00}, //valueForIssuanceTx[:],
+		txscript.SigHashAll,
+	)
+	sig, err := privkey.Sign(sigHashForIssuanceTx[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sigWithHashType := append(sig.Serialize(), byte(txscript.SigHashAll))
+
+	// Update the pset adding the input signature script and the pubkey.
+	_, err = updater.Sign(0, sigWithHashType, pubkey.SerializeCompressed(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Finalize the partial transaction.
+	err = FinalizeAll(issuancePset)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Extract the final signed transaction from the Pset wrapper.
+	finalIssuanceTx, err := Extract(issuancePset)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Serialize the transaction and try to broadcast.
+	issuanceTxHex, err := finalIssuanceTx.ToHex()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	issuanceTxID, err := broadcast(issuanceTxHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// RE-ISSUANCE
+
+	// we need to unblind the token output of the issuance tx to get its
+	// asset blinding factor that will be used as reissuance's blinding nonce
+	nonce, _ := confidential.NonceHash(
+		finalIssuanceTx.Outputs[1].Nonce,
+		pk.Serialize(),
+	)
+	unblindOuptutArg := confidential.UnblindOutputArg{
+		Nonce:           nonce,
+		Rangeproof:      finalIssuanceTx.Outputs[1].RangeProof,
+		AssetCommitment: finalIssuanceTx.Outputs[1].Asset,
+		ValueCommitment: finalIssuanceTx.Outputs[1].Value,
+		ScriptPubkey:    finalIssuanceTx.Outputs[1].Script,
+	}
+	unblinded, err := confidential.UnblindOutput(unblindOuptutArg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// lbtc input for paying network fees
+	txInputHashForReissuanceTx, _ := hex.DecodeString(issuanceTxID)
+	txInputHashForReissuanceTx = bufferutil.ReverseBytes(txInputHashForReissuanceTx)
+	// we know that the third output of the issuance tx is the lbtc change
+	txInputIndexForReissuanceTx := uint32(2)
+	txInputForReissuanceTx := transaction.NewTxInput(
+		txInputHashForReissuanceTx,
+		txInputIndexForReissuanceTx,
+	)
+
+	inputsForReissuanceTx := []*transaction.TxInput{txInputForReissuanceTx}
+	outputsForReissuanceTx := []*transaction.TxOutput{}
+	reissuancePset, err := New(inputsForReissuanceTx, outputsForReissuanceTx, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updater, err = NewUpdater(reissuancePset)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updater.AddInWitnessUtxo(finalIssuanceTx.Outputs[2], 0)
+
+	issuance := transaction.NewTxIssuanceFromContractHash(
+		finalIssuanceTx.Inputs[0].Issuance.AssetEntropy,
+	)
+	err = issuance.GenerateEntropy(txInputHashForIssuanceTx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entropy := hex.EncodeToString(
+		bufferutil.ReverseBytes(issuance.TxIssuance.AssetEntropy),
+	)
+
+	reissuanceArg := AddReissuanceArg{
+		InputHash:    issuanceTxID,
+		InputIndex:   uint32(1),
+		InputBlinder: unblinded.AssetBlindingFactor,
+		Entropy:      entropy,
+		AssetAmount:  3300000000,
+		TokenAmount:  100000000,
+		AssetAddress: address,
+		WitnessUtxo:  finalIssuanceTx.Outputs[1],
+		Network:      &network.Regtest,
+	}
+
+	err = updater.AddReissuance(reissuanceArg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = updater.AddInSighashType(txscript.SigHashAll, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = updater.AddInSighashType(txscript.SigHashAll, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add change and fees
+	changeScriptForReissuanceTx := p2wpkh.WitnessScript
+	changeValueForReissuanceTx, _ := confidential.SatoshiToElementsValue(99991000)
+	changeOutputForReissuanceTx := transaction.NewTxOutput(
+		lbtc,
+		changeValueForReissuanceTx[:],
+		changeScriptForReissuanceTx,
+	)
+	updater.AddOutput(changeOutputForReissuanceTx)
+
+	blindingPrivKeysForReissuanceTx := [][]byte{pk1.Serialize(), pk.Serialize()}
+	blindingPubKeysForReissuanceTx := make([][]byte, 0)
+	pk, err = btcec.NewPrivateKey(btcec.S256())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// blinding pubkey for asset output
+	blindingpubkey = pk.PubKey().SerializeCompressed()
+	blindingPubKeysForReissuanceTx = append(
+		blindingPubKeysForReissuanceTx,
+		blindingpubkey,
+	)
+
+	// blinding pubkey for token output
+	blindingPubKeysForReissuanceTx = append(
+		blindingPubKeysForReissuanceTx,
+		blindingpubkey,
+	)
+
+	// blinding pubkey for change output
+	pk1, err = btcec.NewPrivateKey(btcec.S256())
+	if err != nil {
+		t.Fatal(err)
+	}
+	blindingpubkey1 = pk1.PubKey().SerializeCompressed()
+	blindingPubKeysForReissuanceTx = append(
+		blindingPubKeysForReissuanceTx,
+		blindingpubkey1,
+	)
+	reissuanceBlindingPrivateKeys := []IssuanceBlindingPrivateKeys{
+		{},
+		{AssetKey: pk.Serialize()},
+	}
+
+	blinder, err = NewBlinder(
+		reissuancePset,
+		blindingPrivKeysForReissuanceTx,
+		blindingPubKeysForReissuanceTx,
+		reissuanceBlindingPrivateKeys,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = blinder.Blind()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	feeValueForReissuanceTx, _ := confidential.SatoshiToElementsValue(5000)
+	feeOutputForReissuanceTx := transaction.NewTxOutput(
+		lbtc,
+		feeValueForReissuanceTx[:],
+		feeScript,
+	)
+	updater.AddOutput(feeOutputForReissuanceTx)
+	fmt.Println("")
+	fmt.Println("*********** UNSIGNED ***********")
+	fmt.Println("")
+	fmt.Println(reissuancePset.UnsignedTx.ToHex())
+
+	sigHash0ForReissuanceTx := updater.Data.UnsignedTx.HashForWitnessV0(
+		0,
+		p2wpkh.Script,
+		changeValueForIssuanceTx[:],
+		txscript.SigHashAll,
+	)
+	fmt.Println(hex.EncodeToString(p2wpkh.Script))
+	fmt.Println("SIGAHSH INPUT 0", hex.EncodeToString(sigHash0ForReissuanceTx[:]))
+	sig0, err := privkey.Sign(sigHash0ForReissuanceTx[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sig0WithHashType := append(sig0.Serialize(), byte(txscript.SigHashAll))
+	fmt.Println(hex.EncodeToString(sig0WithHashType))
+
+	// Update the pset adding the input signature script and the pubkey.
+	_, err = updater.Sign(0, sig0WithHashType, pubkey.SerializeCompressed(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tokenValueForReissuanceTx, _ := confidential.SatoshiToElementsValue(100000000)
+	sigHash1ForReissuanceTx := updater.Data.UnsignedTx.HashForWitnessV0(
+		1,
+		p2wpkh.Script,
+		tokenValueForReissuanceTx[:],
+		txscript.SigHashAll,
+	)
+	fmt.Println("SIGAHSH INPUT 1", hex.EncodeToString(sigHash1ForReissuanceTx[:]))
+	sig1, err := privkey.Sign(sigHash1ForReissuanceTx[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sig1WithHashType := append(sig1.Serialize(), byte(txscript.SigHashAll))
+	fmt.Println(hex.EncodeToString(sig1WithHashType))
+
+	// Update the pset adding the input signature script and the pubkey.
+	_, err = updater.Sign(1, sig1WithHashType, pubkey.SerializeCompressed(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Finalize the partial transaction.
+	err = FinalizeAll(reissuancePset)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Extract the final signed transaction from the Pset wrapper.
+	finalReissuanceTx, err := Extract(reissuancePset)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Serialize the transaction and try to broadcast.
+	reissuanceTxHex, err := finalReissuanceTx.ToHex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println("")
+	fmt.Println("*********** SIGNED ***********")
+	fmt.Println("")
+	fmt.Println(reissuanceTxHex)
+
+	reissuanceTxID, err := broadcast(reissuanceTxHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fmt.Println(reissuanceTxID)
+}
+
 func faucet(address string) (string, error) {
 	baseUrl, ok := os.LookupEnv("API_URL")
 	if !ok {
