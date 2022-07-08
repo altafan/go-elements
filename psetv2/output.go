@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"sort"
 
 	"github.com/vulpemventures/go-elements/internal/bufferutil"
 )
@@ -50,23 +51,26 @@ var (
 )
 
 type Output struct {
-	RedeemScript         []byte
-	WitnessScript        []byte
-	Bip32Derivation      []DerivationPathWithPubKey
-	Value                uint64
-	Script               []byte
-	ValueCommitment      []byte
-	Asset                []byte
-	AssetCommitment      []byte
-	ValueRangeproof      []byte
-	AssetSurjectionProof []byte
-	BlindingPubkey       []byte
-	EcdhPubkey           []byte
-	BlinderIndex         uint32
-	BlindValueProof      []byte
-	BlindAssetProof      []byte
-	ProprietaryData      []ProprietaryData
-	Unknowns             []KeyPair
+	RedeemScript           []byte
+	WitnessScript          []byte
+	Bip32Derivation        []DerivationPathWithPubKey
+	Value                  uint64
+	Script                 []byte
+	ValueCommitment        []byte
+	Asset                  []byte
+	AssetCommitment        []byte
+	ValueRangeproof        []byte
+	AssetSurjectionProof   []byte
+	BlindingPubkey         []byte
+	EcdhPubkey             []byte
+	BlinderIndex           uint32
+	BlindValueProof        []byte
+	BlindAssetProof        []byte
+	ProprietaryData        []ProprietaryData
+	TaprootInternalKey     []byte
+	TaprootTapTree         []byte
+	TaprootBip32Derivation []*TaprootBip32Derivation
+	Unknowns               []KeyPair
 }
 
 func (o *Output) SanityCheck() error {
@@ -283,6 +287,49 @@ func (o *Output) getKeyPairs() ([]KeyPair, error) {
 		keyPairs = append(keyPairs, kp)
 	}
 
+	if o.TaprootInternalKey != nil {
+		taprootInternalKeyPair := KeyPair{
+			Key: Key{
+				KeyType: OutputTapInternalKey,
+				KeyData: nil,
+			},
+			Value: o.TaprootInternalKey,
+		}
+		keyPairs = append(keyPairs, taprootInternalKeyPair)
+	}
+
+	if o.TaprootTapTree != nil {
+		taprootTapTreeKeyPair := KeyPair{
+			Key: Key{
+				KeyType: OutputTapTree,
+				KeyData: nil,
+			},
+			Value: o.TaprootTapTree,
+		}
+		keyPairs = append(keyPairs, taprootTapTreeKeyPair)
+	}
+
+	if len(o.TaprootBip32Derivation) > 0 {
+		sort.Slice(o.TaprootBip32Derivation, func(i, j int) bool {
+			return o.TaprootBip32Derivation[i].SortBefore(o.TaprootBip32Derivation[j])
+		})
+
+		for _, derivation := range o.TaprootBip32Derivation {
+			value, err := serializeTaprootBip32Derivation(derivation)
+			if err != nil {
+				return nil, err
+			}
+			taprootBip32DerivationKeyPair := KeyPair{
+				Key: Key{
+					KeyType: OutputTapBip32Derivation,
+					KeyData: derivation.XOnlyPubKey,
+				},
+				Value: value,
+			}
+			keyPairs = append(keyPairs, taprootBip32DerivationKeyPair)
+		}
+	}
+
 	keyPairs = append(keyPairs, o.Unknowns...)
 
 	return keyPairs, nil
@@ -448,6 +495,53 @@ func (o *Output) deserialize(buf *bytes.Buffer) error {
 					o.ProprietaryData = append(o.ProprietaryData, pd)
 				}
 			}
+
+		case OutputTapInternalKey:
+			if o.TaprootInternalKey != nil {
+				return ErrDuplicateKey
+			}
+			if kp.Key.KeyData != nil {
+				return ErrInvalidKeydata
+			}
+
+			if !validateXOnlyPubkey(kp.Value) {
+				return ErrInvalidKeydata
+			}
+
+			o.TaprootInternalKey = kp.Value
+
+		case OutputTapTree:
+			if o.TaprootTapTree != nil {
+				return ErrDuplicateKey
+			}
+			if kp.Key.KeyData != nil {
+				return ErrInvalidKeydata
+			}
+
+			o.TaprootTapTree = kp.Value
+
+		case OutputTapBip32Derivation:
+			if !validateXOnlyPubkey(kp.Key.KeyData) {
+				return ErrInvalidKeydata
+			}
+
+			derivation, err := readTaprootBip32Derivation(kp.Key.KeyData, kp.Value)
+			if err != nil {
+				return err
+			}
+
+			// Duplicate keys are not allowed
+			for _, x := range o.TaprootBip32Derivation {
+				if bytes.Equal(x.XOnlyPubKey, kp.Key.KeyData) {
+					return ErrDuplicateKey
+				}
+			}
+
+			o.TaprootBip32Derivation = append(
+				o.TaprootBip32Derivation,
+				derivation,
+			)
+
 		default:
 			o.Unknowns = append(o.Unknowns, kp)
 		}

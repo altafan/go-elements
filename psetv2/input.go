@@ -4,10 +4,16 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"sort"
 
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/vulpemventures/go-elements/internal/bufferutil"
 	"github.com/vulpemventures/go-elements/transaction"
+)
+
+const (
+	schnorrSigMinLength = 64
+	schnorrSigMaxLength = schnorrSigMinLength + 1 // add sighash byte
 )
 
 const (
@@ -125,6 +131,11 @@ var (
 	ErrInInvalidNonWitnessUtxo = fmt.Errorf(
 		"non-witness utxo hash does not match input txid",
 	)
+	ErrInInvalidTaprootKeySpendSig    = fmt.Errorf("invalid input taproot key spend signature")
+	ErrInInvalidTaprootScriptSpendSig = fmt.Errorf("invalid input taproot script spend signature")
+	ErrInInvalidTaprootLeafScript     = fmt.Errorf("invalid input taproot leaf script")
+	ErrInInvalidTaprootMerkleRoot     = fmt.Errorf("invalid input taproot merkle root")
+	ErrInInvalidTaprootInternalKey    = fmt.Errorf("invalid input taproot internal key")
 )
 
 type Input struct {
@@ -164,6 +175,12 @@ type Input struct {
 	IssuanceBlindValueProof         []byte
 	IssuanceBlindInflationKeysProof []byte
 	ProprietaryData                 []ProprietaryData
+	TaprootKeySpendSig              []byte
+	TaprootScriptSpendSig           []*TaprootScriptSpendSig
+	TaprootLeafScript               []*TaprootTapLeafScript
+	TaprootBip32Derivation          []*TaprootBip32Derivation
+	TaprootInternalKey              []byte
+	TaprootMerkleRoot               []byte
 	Unknowns                        []KeyPair
 }
 
@@ -186,6 +203,32 @@ func (i *Input) SanityCheck() error {
 	issuanceInflationKeysRangeproofSet := len(i.IssuanceInflationKeysRangeproof) > 0
 	if issuanceInflationKeysCommitmentSet != issuanceInflationKeysRangeproofSet {
 		return ErrInInvalidIssuanceInflationKeysBlinding
+	}
+
+	if i.TaprootInternalKey != nil && !validateXOnlyPubkey(i.TaprootInternalKey) {
+		return ErrInInvalidTaprootInternalKey
+	}
+
+	if i.TaprootMerkleRoot != nil && len(i.TaprootMerkleRoot) != 32 {
+		return ErrInInvalidTaprootMerkleRoot
+	}
+
+	if i.TaprootKeySpendSig != nil {
+		if !validateSchnorrSignature(i.TaprootKeySpendSig) {
+			return ErrInInvalidTaprootKeySpendSig
+		}
+	}
+
+	for _, taprootScriptSpendSig := range i.TaprootScriptSpendSig {
+		if !(validateXOnlyPubkey(taprootScriptSpendSig.XOnlyPubKey) && validateSchnorrSignature(taprootScriptSpendSig.Signature)) {
+			return ErrInInvalidTaprootScriptSpendSig
+		}
+	}
+
+	for _, taprootTapLeafScript := range i.TaprootLeafScript {
+		if !validateControlBlock(taprootTapLeafScript.ControlBlock) {
+			return ErrInInvalidTaprootLeafScript
+		}
 	}
 
 	return nil
@@ -686,6 +729,116 @@ func (i *Input) getKeyPairs() ([]KeyPair, error) {
 		keyPairs = append(keyPairs, kp)
 	}
 
+	if i.TaprootInternalKey != nil {
+		kp := KeyPair{
+			Key: Key{
+				KeyType: InputTapInternalKey,
+				KeyData: nil,
+			},
+			Value: i.TaprootInternalKey,
+		}
+		keyPairs = append(keyPairs, kp)
+	}
+
+	if i.TaprootMerkleRoot != nil {
+		kp := KeyPair{
+			Key: Key{
+				KeyType: InputTapMerkleRoot,
+				KeyData: nil,
+			},
+			Value: i.TaprootMerkleRoot,
+		}
+		keyPairs = append(keyPairs, kp)
+	}
+
+	if i.TaprootKeySpendSig != nil {
+		kp := KeyPair{
+			Key: Key{
+				KeyType: InputTapKeySig,
+				KeyData: nil,
+			},
+			Value: i.TaprootKeySpendSig,
+		}
+		keyPairs = append(keyPairs, kp)
+	}
+
+	if len(i.TaprootBip32Derivation) > 0 {
+		sort.Slice(i.TaprootBip32Derivation, func(j, k int) bool {
+			return i.TaprootBip32Derivation[j].SortBefore(
+				i.TaprootBip32Derivation[k],
+			)
+		})
+
+		for _, derivation := range i.TaprootBip32Derivation {
+			value, err := serializeTaprootBip32Derivation(
+				derivation,
+			)
+			if err != nil {
+				return nil, err
+			}
+			kp := KeyPair{
+				Key: Key{
+					KeyType: InputTapBip32Derivation,
+					KeyData: derivation.XOnlyPubKey,
+				},
+				Value: value,
+			}
+			keyPairs = append(keyPairs, kp)
+		}
+	}
+
+	if len(i.TaprootLeafScript) > 0 {
+		sort.Slice(i.TaprootLeafScript, func(j, k int) bool {
+			return i.TaprootLeafScript[j].SortBefore(
+				i.TaprootLeafScript[k],
+			)
+		})
+
+		for _, leaf := range i.TaprootLeafScript {
+			value, err := serializeTaprootLeafScript(leaf)
+			if err != nil {
+				return nil, err
+			}
+			kp := KeyPair{
+				Key: Key{
+					KeyType: InputTapLeafScript,
+					KeyData: leaf.ControlBlock,
+				},
+				Value: value,
+			}
+			keyPairs = append(keyPairs, kp)
+		}
+	}
+
+	if len(i.TaprootScriptSpendSig) > 0 {
+		sort.Slice(i.TaprootScriptSpendSig, func(j, k int) bool {
+			return i.TaprootScriptSpendSig[j].SortBefore(
+				i.TaprootScriptSpendSig[k],
+			)
+		})
+
+		for _, sig := range i.TaprootScriptSpendSig {
+			keydata, err := serializeTaprootScriptSpendSig(sig)
+			if err != nil {
+				return nil, err
+			}
+
+			value := append([]byte{}, sig.Signature...)
+			if sig.SigHash != txscript.SigHashDefault {
+				value = append(value, byte(sig.SigHash))
+			}
+
+			kp := KeyPair{
+				Key: Key{
+					KeyType: InputTapScriptSig,
+					KeyData: keydata,
+				},
+				Value: value,
+			}
+			keyPairs = append(keyPairs, kp)
+		}
+	}
+
 	keyPairs = append(keyPairs, i.Unknowns...)
 
 	return keyPairs, nil
@@ -1015,6 +1168,159 @@ func (i *Input) deserialize(buf *bytes.Buffer) error {
 					i.ProprietaryData = append(i.ProprietaryData, pd)
 				}
 			}
+		case InputTapKeySig:
+			if i.TaprootKeySpendSig != nil {
+				return ErrDuplicateKey
+			}
+			if kp.Key.KeyData != nil {
+				return ErrInvalidKeydata
+			}
+
+			// The signature can either be 64 or 65 bytes.
+			switch {
+			case len(kp.Value) == schnorrSigMinLength:
+				if !validateSchnorrSignature(kp.Value) {
+					return ErrInvalidKeydata
+				}
+
+			case len(kp.Value) == schnorrSigMaxLength:
+				if !validateSchnorrSignature(
+					kp.Value[0:schnorrSigMinLength],
+				) {
+					return ErrInvalidKeydata
+				}
+
+			default:
+				return ErrInvalidKeydata
+			}
+
+			i.TaprootKeySpendSig = kp.Value
+
+		case InputTapScriptSig:
+			// The key data for the script spend signature is:
+			//   <xonlypubkey> <leafhash>
+			if len(kp.Key.KeyData) != 64 {
+				return ErrInvalidKeydata
+			}
+
+			newPartialSig := TaprootScriptSpendSig{
+				XOnlyPubKey: kp.Key.KeyData[:32],
+				LeafHash:    kp.Key.KeyData[32:],
+			}
+
+			if !validateXOnlyPubkey(newPartialSig.XOnlyPubKey) {
+				return ErrInvalidKeydata
+			}
+
+			// The signature can either be 64 or 65 bytes.
+			switch len(kp.Value) {
+			case schnorrSigMinLength:
+				newPartialSig.Signature = kp.Value
+				newPartialSig.SigHash = txscript.SigHashDefault
+
+			case schnorrSigMaxLength:
+				newPartialSig.Signature = kp.Value[0:schnorrSigMinLength]
+				newPartialSig.SigHash = txscript.SigHashType(
+					kp.Value[schnorrSigMinLength],
+				)
+
+			default:
+				return ErrInvalidKeydata
+			}
+
+			if !validateSchnorrSignature(newPartialSig.Signature) {
+				return ErrInvalidKeydata
+			}
+
+			// Duplicate keys are not allowed.
+			for _, x := range i.TaprootScriptSpendSig {
+				if x.EqualKey(&newPartialSig) {
+					return ErrDuplicateKey
+				}
+			}
+
+			i.TaprootScriptSpendSig = append(
+				i.TaprootScriptSpendSig, &newPartialSig,
+			)
+
+		case InputTapLeafScript:
+			if len(kp.Value) < 1 {
+				return ErrInvalidKeydata
+			}
+
+			newLeafScript := TaprootTapLeafScript{
+				ControlBlock: kp.Key.KeyData,
+				Script:       kp.Value[:len(kp.Value)-1],
+				LeafVersion: txscript.TapscriptLeafVersion(
+					kp.Value[len(kp.Value)-1],
+				),
+			}
+
+			if !validateControlBlock(newLeafScript.ControlBlock) {
+				return ErrInvalidKeydata
+			}
+
+			// Duplicate keys are not allowed.
+			for _, x := range i.TaprootLeafScript {
+				if bytes.Equal(
+					x.ControlBlock,
+					newLeafScript.ControlBlock,
+				) {
+					return ErrDuplicateKey
+				}
+			}
+
+			i.TaprootLeafScript = append(
+				i.TaprootLeafScript, &newLeafScript,
+			)
+
+		case InputTapBip32Derivation:
+			if !validateXOnlyPubkey(kp.Key.KeyData) {
+				return ErrInvalidKeydata
+			}
+
+			taprootDerivation, err := readTaprootBip32Derivation(
+				kp.Key.KeyData, kp.Value,
+			)
+			if err != nil {
+				return err
+			}
+
+			// Duplicate keys are not allowed.
+			for _, x := range i.TaprootBip32Derivation {
+				if bytes.Equal(x.XOnlyPubKey, kp.Key.KeyData) {
+					return ErrDuplicateKey
+				}
+			}
+
+			i.TaprootBip32Derivation = append(
+				i.TaprootBip32Derivation, taprootDerivation,
+			)
+
+		case InputTapInternalKey:
+			if i.TaprootInternalKey != nil {
+				return ErrDuplicateKey
+			}
+			if kp.Key.KeyData != nil {
+				return ErrInvalidKeydata
+			}
+
+			if !validateXOnlyPubkey(kp.Value) {
+				return ErrInvalidKeydata
+			}
+
+			i.TaprootInternalKey = kp.Value
+
+		case InputTapMerkleRoot:
+			if i.TaprootMerkleRoot != nil {
+				return ErrDuplicateKey
+			}
+			if kp.Key.KeyData != nil {
+				return ErrInvalidKeydata
+			}
+
+			i.TaprootMerkleRoot = kp.Value
+
 		default:
 			i.Unknowns = append(i.Unknowns, kp)
 		}

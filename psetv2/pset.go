@@ -35,7 +35,8 @@ var (
 	ErrInvalidPsbtFormat        = fmt.Errorf("invalid PSBT serialization format")
 	ErrNoMoreKeyPairs           = fmt.Errorf("no more key-pairs")
 	ErrInvalidMagicBytes        = fmt.Errorf("invalid magic bytes")
-	ErrDuplicateKey             = fmt.Errorf("invalid psbt due to duplicate key")
+	ErrDuplicateKey             = fmt.Errorf("invalid pset due to duplicate key")
+	ErrInvalidKeydata           = fmt.Errorf("invalid pset key data")
 	ErrPsetMissingBlindedOutput = fmt.Errorf(
 		"pset has blinded inputs, at least one output must be blinded",
 	)
