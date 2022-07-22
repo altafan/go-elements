@@ -11,6 +11,7 @@ import (
 	"fmt"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 
 	"github.com/vulpemventures/go-elements/address"
@@ -24,6 +25,7 @@ const (
 )
 
 var (
+	ErrInputIsFinalized                  = fmt.Errorf("input is finalized")
 	ErrInputIndexOutOfRange              = fmt.Errorf("provided input index is out of range")
 	ErrOutputIndexOutOfRange             = fmt.Errorf("provided output index is out of range")
 	ErrInvalidSignatureForInput          = fmt.Errorf("signature does not correspond to this input")
@@ -37,6 +39,13 @@ var (
 	ErrInReissuanceZeroTokenBlinder      = fmt.Errorf("token prevout blinder must not be a zero blinder")
 	ErrInReissuanceInvalidAssetAmount    = fmt.Errorf("invalid reissuance asset amount")
 	ErrInReissuanceInvalidTokenAmount    = fmt.Errorf("invalid reissuance token amount")
+	ErrInInvalidTapLeafControlBlock      = fmt.Errorf("invalid tap leaf control block")
+	ErrInInvalidSchnorrSignature         = fmt.Errorf("invalid schnorr signature")
+	ErrInInputHasTapKeySig               = fmt.Errorf("input already has a tap key signature")
+	ErrInInvalidTapScriptSig             = fmt.Errorf("invalid taproot script sig")
+	ErrInInvalidTapInternalKey           = fmt.Errorf("invalid taproot internal key")
+	ErrOutHasTapTree                     = fmt.Errorf("output already has a tap tree")
+	ErrOutHasTapInternalKey              = fmt.Errorf("output already has a tap internal key")
 )
 
 // Updater encapsulates the role 'Updater' as specified in BIP174; it accepts
@@ -738,4 +747,134 @@ func findInputWithEmptyIssuance(p *Pset) (uint32, []byte, int) {
 		}
 	}
 	return 0, nil, -1
+}
+
+func (u *Updater) validateInIndex(inIndex int) bool {
+	return inIndex <= len(u.Pset.Inputs)-1
+}
+
+func (u *Updater) validateOutIndex(outIndex int) bool {
+	return outIndex <= len(u.Pset.Outputs)-1
+}
+
+// AddInTapLeafScript adds a new leaf to the pset input
+func (u *Updater) AddInTapLeafScript(leaf *TaprootTapLeafScript, inIndex int) error {
+	if !u.validateInIndex(inIndex) {
+		return ErrInputIndexOutOfRange
+	}
+
+	if !validateControlBlock(leaf.ControlBlock) {
+		return ErrInInvalidTapLeafControlBlock
+	}
+
+	u.Pset.Inputs[inIndex].TaprootLeafScript = append(u.Pset.Inputs[inIndex].TaprootLeafScript, leaf)
+	return u.Pset.SanityCheck()
+}
+
+// AddInTapInternalKey adds the xonly public key as internal taproot key to the input
+func (u *Updater) AddInTapInternalKey(internalXOnlyPublicKey []byte, inIndex int) error {
+	if !u.validateInIndex(inIndex) {
+		return ErrInputIndexOutOfRange
+	}
+
+	if !validateXOnlyPubkey(internalXOnlyPublicKey) {
+		return ErrInInvalidTapInternalKey
+	}
+
+	u.Pset.Inputs[inIndex].TaprootInternalKey = internalXOnlyPublicKey
+	return u.Pset.SanityCheck()
+}
+
+// AddInTapMerkleRoot adds the taproot script merkle root to the input
+func (u *Updater) AddInTapMerkleRoot(merkleRoot *chainhash.Hash, inIndex int) error {
+	merkleRootBytes := merkleRoot.CloneBytes()
+
+	if !u.validateInIndex(inIndex) {
+		return ErrInputIndexOutOfRange
+	}
+
+	u.Pset.Inputs[inIndex].TaprootMerkleRoot = merkleRootBytes
+	return u.Pset.SanityCheck()
+}
+
+// AddInTapBip32Derivation adds the taproot derivation struct to the input
+func (u *Updater) AddInTapBip32Derivation(taprootDerivation *TaprootBip32Derivation, inIndex int) error {
+	if !u.validateInIndex(inIndex) {
+		return ErrInputIndexOutOfRange
+	}
+
+	u.Pset.Inputs[inIndex].TaprootBip32Derivation = append(u.Pset.Inputs[inIndex].TaprootBip32Derivation, taprootDerivation)
+	return u.Pset.SanityCheck()
+}
+
+// addInTapKeySig adds the key-spend signature to the pset input, it fails if a tapkeysig is already set up
+// does not validate the signature with the sighash message
+func (u *Updater) addInTapKeySig(sig []byte, inIndex int) error {
+	if !u.validateInIndex(inIndex) {
+		return ErrInputIndexOutOfRange
+	}
+
+	if u.Pset.Inputs[inIndex].TaprootKeySpendSig != nil {
+		return ErrInInputHasTapKeySig
+	}
+
+	if !validateSchnorrSignature(sig[:schnorrSigMinLength]) {
+		return ErrInInvalidSchnorrSignature
+	}
+
+	u.Pset.Inputs[inIndex].TaprootKeySpendSig = sig
+	return u.Pset.SanityCheck()
+}
+
+// addInTapScriptSig adds a tapscript signature to the pset input
+// does not validate the signature with the sighash message
+func (u *Updater) addInTapScriptSig(sig *TaprootScriptSpendSig, inIndex int) error {
+	if !u.validateInIndex(inIndex) {
+		return ErrInputIndexOutOfRange
+	}
+
+	if !(validateSchnorrSignature(sig.Signature) && validateXOnlyPubkey(sig.XOnlyPubKey)) {
+		return ErrInInvalidTapScriptSig
+	}
+
+	u.Pset.Inputs[inIndex].TaprootScriptSpendSig = append(u.Pset.Inputs[inIndex].TaprootScriptSpendSig, sig)
+	return u.Pset.SanityCheck()
+}
+
+// AddOutTapInternalKey adds the xonly internal public key to the taproot output
+func (u *Updater) AddOutTapInternalKey(outIndex int, tapInternalKey []byte) error {
+	if !u.validateOutIndex(outIndex) {
+		return ErrOutputIndexOutOfRange
+	}
+
+	if u.Pset.Outputs[outIndex].TaprootInternalKey != nil {
+		return ErrOutHasTapInternalKey
+	}
+
+	u.Pset.Outputs[outIndex].TaprootInternalKey = tapInternalKey
+	return u.Pset.SanityCheck()
+}
+
+// AddOutTapTree adds the merkle root of the taproot script tree to the output
+func (u *Updater) AddOutTapTree(outIndex int, tree []byte) error {
+	if !u.validateOutIndex(outIndex) {
+		return ErrOutputIndexOutOfRange
+	}
+
+	if u.Pset.Outputs[outIndex].TaprootTapTree != nil {
+		return ErrOutHasTapTree
+	}
+
+	u.Pset.Outputs[outIndex].TaprootTapTree = tree
+	return u.Pset.SanityCheck()
+}
+
+// AddOutTapBip32Derivation adds a taproot bip32 derivation struct to the output
+func (u *Updater) AddOutTapBip32Derivation(derivation *TaprootBip32Derivation, outIndex int) error {
+	if !u.validateOutIndex(outIndex) {
+		return ErrOutputIndexOutOfRange
+	}
+
+	u.Pset.Outputs[outIndex].TaprootBip32Derivation = append(u.Pset.Outputs[outIndex].TaprootBip32Derivation, derivation)
+	return u.Pset.SanityCheck()
 }

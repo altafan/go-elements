@@ -47,7 +47,10 @@ var (
 	ErrOutInvalidBlindingPubKey = fmt.Errorf(
 		"invalid output blinding pubkey length",
 	)
-	ErrOutInvalidBlinderIndex = fmt.Errorf("invalid output blinder index length")
+	ErrOutInvalidBlinderIndex           = fmt.Errorf("invalid output blinder index length")
+	ErrOutInvalidTaprootInternalKey     = fmt.Errorf("invalid output taproot internal key")
+	ErrOutInvalidTaprootTapTree         = fmt.Errorf("invalid output taproot tap tree")
+	ErrOutInvalidTaprootBip32Derivation = fmt.Errorf("invalid output taproot bip32 derivation")
 )
 
 type Output struct {
@@ -84,6 +87,19 @@ func (o *Output) SanityCheck() error {
 		return ErrOutInvalidBlinderIndexState
 	}
 
+	if o.TaprootInternalKey != nil && !validateXOnlyPubkey(o.TaprootInternalKey) {
+		return ErrOutInvalidTaprootInternalKey
+	}
+
+	if len(o.TaprootBip32Derivation) > 0 {
+		for _, d := range o.TaprootBip32Derivation {
+			if !validateXOnlyPubkey(d.XOnlyPubKey) {
+				return ErrOutInvalidTaprootBip32Derivation
+			}
+		}
+	}
+
+	// TODO: validate taproot tap tree
 	return nil
 }
 

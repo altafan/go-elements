@@ -1328,3 +1328,17 @@ func (i *Input) deserialize(buf *bytes.Buffer) error {
 
 	return i.SanityCheck()
 }
+
+// getPrevoutScriptAssetValue is an helper function for witness v1 (taproot) sig message hash
+func (i Input) getPrevoutScriptAssetValue() ([]byte, []byte, []byte, error) {
+	if i.WitnessUtxo != nil {
+		return i.WitnessUtxo.Script, i.WitnessUtxo.Asset, i.WitnessUtxo.Value, nil
+	}
+
+	if i.NonWitnessUtxo != nil {
+		prevout := i.NonWitnessUtxo.Outputs[i.PreviousTxIndex]
+		return prevout.Script, prevout.Asset, prevout.Value, nil
+	}
+
+	return nil, nil, nil, fmt.Errorf("input needs nonWitnessUtxo or witnessUtxo to get the prevout")
+}

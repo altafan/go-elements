@@ -535,8 +535,8 @@ func (p *Pset) serialize() ([]byte, error) {
 
 	// With that our global section is done, so we'll write out the
 	// separator.
-	separator := []byte{0x00}
-	if _, err := buffer.Write(separator); err != nil {
+	separator := byte(0x00)
+	if err := buffer.WriteByte(separator); err != nil {
 		return nil, err
 	}
 
@@ -546,7 +546,7 @@ func (p *Pset) serialize() ([]byte, error) {
 			return nil, err
 		}
 
-		if _, err := buffer.Write(separator); err != nil {
+		if err := buffer.WriteByte(separator); err != nil {
 			return nil, err
 		}
 	}
@@ -557,7 +557,7 @@ func (p *Pset) serialize() ([]byte, error) {
 			return nil, err
 		}
 
-		if _, err := buffer.Write(separator); err != nil {
+		if err := buffer.WriteByte(separator); err != nil {
 			return nil, err
 		}
 	}

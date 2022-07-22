@@ -160,6 +160,16 @@ func NewIndexedElementsTapScriptTree(numLeaves int) *IndexedElementsTapScriptTre
 	}
 }
 
+// Find can be used to get the leaf and the proof of a given leaf hash
+// returns an error if the leaf is not found in the indexed tree
+func (t *IndexedElementsTapScriptTree) FindProof(chainHash chainhash.Hash) (*TapscriptElementsProof, error) {
+	if leafIndex, ok := t.LeafProofIndex[chainHash]; ok {
+		return &t.LeafMerkleProofs[leafIndex], nil
+	}
+
+	return nil, fmt.Errorf("leaf not found")
+}
+
 // AssembleTaprootScriptTree constructs a new fully indexed tapscript tree
 // given a series of leaf nodes. A combination of a recursive data structure,
 // and an array-based representation are used to both generate the tree and
