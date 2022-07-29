@@ -805,3 +805,18 @@ func TestBroadcastBlindedSwapTx(t *testing.T) {
 	_, err = broadcastTransaction(ptx)
 	require.NoError(t, err)
 }
+
+func TestInvalidPset(t *testing.T) {
+	file, _ := ioutil.ReadFile("testdata/invalid.json")
+	var tests []map[string]interface{}
+	json.Unmarshal(file, &tests)
+
+	for _, v := range tests {
+		t.Run(v["comment"].(string), func(t *testing.T) {
+			psetBase64 := v["base64"].(string)
+
+			_, err := psetv2.NewPsetFromBase64(psetBase64)
+			require.Error(t, err)
+		})
+	}
+}
