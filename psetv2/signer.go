@@ -12,6 +12,7 @@ package psetv2
 import (
 	"fmt"
 
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 )
 
@@ -128,6 +129,95 @@ func (s *Signer) SignInput(
 	}
 
 	if err := s.addPartialSignature(inIndex, sig, pubKey); err != nil {
+		return fmt.Errorf("failed to add signature for input %d: %s", inIndex, err)
+	}
+
+	s.Pset.Global = p.Global
+	s.Pset.Inputs = p.Inputs
+	s.Pset.Outputs = p.Outputs
+	return s.Pset.SanityCheck()
+}
+
+// SignTaprootInputKeyPath adds a key-path spent sig to the input and validate with the input data
+func (s *Signer) SignTaprootInputKeyPath(inIndex int, sig, internalPubKey, merkleRoot []byte) error {
+	if inIndex < 0 || inIndex >= int(s.Pset.Global.InputCount) {
+		return ErrInputIndexOutOfRange
+	}
+
+	if sig == nil {
+		return fmt.Errorf("sig is nil")
+	}
+
+	p := s.Pset.Copy()
+	input := s.Pset.Inputs[inIndex]
+
+	if isFinalized(p, inIndex) {
+		return ErrInputIsFinalized
+	}
+
+	hashType := input.SigHashType & 0x1f
+	if hashType == txscript.SigHashAll || hashType == txscript.SigHashDefault {
+		for _, out := range p.Outputs {
+			if out.NeedsBlinding() && !out.IsFullyBlinded() {
+				return ErrSignerForbiddenSigning
+			}
+		}
+	}
+
+	if internalPubKey != nil {
+		if err := s.AddInTapInternalKey(internalPubKey, inIndex); err != nil {
+			return fmt.Errorf("failed to add input taproot internal pubkey to input %d: %s", inIndex, err)
+		}
+	}
+
+	if merkleRoot != nil {
+		chHash, err := chainhash.NewHash(merkleRoot)
+		if err != nil {
+			return fmt.Errorf("invalid merkle root: %s", err)
+		}
+
+		if err := s.AddInTapMerkleRoot(chHash, inIndex); err != nil {
+			return fmt.Errorf("failed to add input taproot merkle root to input %d: %s", inIndex, err)
+		}
+	}
+
+	if err := s.addInTapKeySig(sig, inIndex); err != nil {
+		return fmt.Errorf("failed to add signature for input %d: %s", inIndex, err)
+	}
+
+	s.Pset.Global = p.Global
+	s.Pset.Inputs = p.Inputs
+	s.Pset.Outputs = p.Outputs
+	return s.Pset.SanityCheck()
+}
+
+// SignTaprootInputScriptPath adds a script-path spent sig to the input
+func (s *Signer) SignTaprootInputScriptPath(inIndex int, sig *TaprootScriptSpendSig) error {
+	if inIndex < 0 || inIndex >= int(s.Pset.Global.InputCount) {
+		return ErrInputIndexOutOfRange
+	}
+
+	if sig == nil {
+		return fmt.Errorf("sig is nil")
+	}
+
+	p := s.Pset.Copy()
+	input := s.Pset.Inputs[inIndex]
+
+	if isFinalized(p, inIndex) {
+		return ErrInputIsFinalized
+	}
+
+	hashType := input.SigHashType & 0x1f
+	if hashType == txscript.SigHashAll || hashType == txscript.SigHashDefault {
+		for _, out := range p.Outputs {
+			if out.NeedsBlinding() && !out.IsFullyBlinded() {
+				return ErrSignerForbiddenSigning
+			}
+		}
+	}
+
+	if err := s.addInTapScriptSig(sig, inIndex); err != nil {
 		return fmt.Errorf("failed to add signature for input %d: %s", inIndex, err)
 	}
 

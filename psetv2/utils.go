@@ -9,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 
 	"github.com/vulpemventures/go-elements/internal/bufferutil"
+	"github.com/vulpemventures/go-elements/taproot"
 	"github.com/vulpemventures/go-elements/transaction"
 )
 
@@ -161,15 +162,13 @@ func checkIsMultiSigScript(pubKeys [][]byte, sigs [][]byte,
 
 // writePKHWitness writes a witness for a p2wkh spending input
 func writePKHWitness(sig []byte, pub []byte) ([]byte, error) {
-	witnessItems := [][]byte{sig, pub}
-
-	return writeTxWitness(witnessItems)
+	return writeTxWitness(sig, pub)
 }
 
 // writeTxWitness is a A utility function due to non-exported witness
 // serialization (writeTxWitness encodes the bitcoin protocol encoding for a
 // transaction input's witness into w).
-func writeTxWitness(wit [][]byte) ([]byte, error) {
+func writeTxWitness(wit ...[]byte) ([]byte, error) {
 	s := bufferutil.NewSerializer(nil)
 
 	if err := s.WriteVarInt(uint64(len(wit))); err != nil {
@@ -215,7 +214,7 @@ func getMultisigScriptWitness(witnessScript []byte, pubKeys [][]byte,
 
 	// Now that we have the full witness stack, we'll serialize it in the
 	// expected format, and return the final bytes.
-	return writeTxWitness(witnessElements)
+	return writeTxWitness(witnessElements...)
 }
 
 // checkSigHashFlags compares the sighash flag byte on a signature with the
@@ -238,4 +237,21 @@ func max(x, y uint32) uint32 {
 		return x
 	}
 	return y
+}
+
+// FindLeafScript attempts to locate the leaf script of a given target Tap Leaf
+// hash in the list of leaf scripts of the given input.
+func FindLeafScript(pInput *Input,
+	targetLeafHash []byte) (*TaprootTapLeafScript, error) {
+
+	for _, leaf := range pInput.TaprootLeafScript {
+		leafHash := taproot.NewTapElementsLeaf(leaf.LeafVersion, leaf.Script).TapHash()
+
+		if bytes.Equal(targetLeafHash, leafHash[:]) {
+			return leaf, nil
+		}
+	}
+
+	return nil, fmt.Errorf("leaf script for target leaf hash %x not "+
+		"found in input", targetLeafHash)
 }

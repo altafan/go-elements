@@ -378,7 +378,10 @@ func (g *Global) deserialize(buf *bytes.Buffer) error {
 						g.Scalars = make([][]byte, 0)
 					}
 
-					g.Scalars = append(g.Scalars, scalar)
+					// check if scalar is already add
+					if !g.hasScalar(scalar) {
+						g.Scalars = append(g.Scalars, scalar)
+					}
 				case GlobalModifiable:
 					if g.Modifiable != nil {
 						return ErrDuplicateKey
@@ -404,6 +407,15 @@ func (g *Global) deserialize(buf *bytes.Buffer) error {
 	}
 
 	return g.SanityCheck()
+}
+
+func (g *Global) hasScalar(scalar []byte) bool {
+	for _, s := range g.Scalars {
+		if bytes.Equal(s, scalar) {
+			return true
+		}
+	}
+	return false
 }
 
 func stepToString(step uint32) string {

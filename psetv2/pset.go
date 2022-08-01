@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -14,6 +15,8 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 
 	"github.com/vulpemventures/go-elements/transaction"
@@ -35,7 +38,8 @@ var (
 	ErrInvalidPsbtFormat        = fmt.Errorf("invalid PSBT serialization format")
 	ErrNoMoreKeyPairs           = fmt.Errorf("no more key-pairs")
 	ErrInvalidMagicBytes        = fmt.Errorf("invalid magic bytes")
-	ErrDuplicateKey             = fmt.Errorf("invalid psbt due to duplicate key")
+	ErrDuplicateKey             = fmt.Errorf("invalid pset due to duplicate key")
+	ErrInvalidKeydata           = fmt.Errorf("invalid pset key data")
 	ErrPsetMissingBlindedOutput = fmt.Errorf(
 		"pset has blinded inputs, at least one output must be blinded",
 	)
@@ -260,9 +264,9 @@ func (p *Pset) UnsignedTx() (*transaction.Transaction, error) {
 	return tx, nil
 }
 
-func (p *Pset) ValidateAllSignatures() (bool, error) {
+func (p *Pset) ValidateAllSignatures(netGenesisBlockHash *chainhash.Hash) (bool, error) {
 	for i := range p.Inputs {
-		valid, err := p.ValidateInputSignatures(i)
+		valid, err := p.ValidateInputSignatures(i, netGenesisBlockHash)
 		if err != nil {
 			return false, err
 		}
@@ -274,21 +278,34 @@ func (p *Pset) ValidateAllSignatures() (bool, error) {
 }
 
 func (p *Pset) ValidateInputSignatures(
-	inputIndex int,
+	inputIndex int, netGenesisBlockHash *chainhash.Hash,
 ) (bool, error) {
 	if len(p.Inputs[inputIndex].PartialSigs) > 0 {
 		for _, partialSig := range p.Inputs[inputIndex].PartialSigs {
 			valid, err := p.validatePartialSignature(inputIndex, partialSig)
-			if err != nil {
-				return false, err
-			}
-			if !valid {
-				return false, nil
+			if err != nil || !valid {
+				return valid, err
 			}
 		}
-		return true, nil
 	}
-	return false, nil
+
+	if netGenesisBlockHash != nil {
+		for _, tapscriptSig := range p.Inputs[inputIndex].TaprootScriptSpendSig {
+			valid, err := p.validateTapscriptSig(inputIndex, netGenesisBlockHash, tapscriptSig)
+			if err != nil || !valid {
+				return valid, err
+			}
+		}
+
+		if p.Inputs[inputIndex].TaprootKeySpendSig != nil {
+			valid, err := p.validateTapKeySig(inputIndex, netGenesisBlockHash)
+			if err != nil || !valid {
+				return valid, err
+			}
+		}
+	}
+
+	return true, nil
 }
 
 func (p *Pset) addInput(in Input) error {
@@ -410,6 +427,95 @@ func (p *Pset) validatePartialSignature(
 	}
 
 	return pSig.Verify(sigHash, pubKey), nil
+}
+
+func (p *Pset) validateTapKeySig(inIndex int, genesisBlockHash *chainhash.Hash) (bool, error) {
+	input := p.Inputs[inIndex]
+	sig, err := schnorr.ParseSignature(input.TaprootKeySpendSig)
+	if err != nil {
+		return false, err
+	}
+
+	pubKey, err := schnorr.ParsePubKey(input.TaprootInternalKey)
+	if err != nil {
+		return false, err
+	}
+
+	preimage, err := p.GetTaprootPreimage(inIndex, genesisBlockHash, nil)
+	if err != nil {
+		return false, err
+	}
+
+	return sig.Verify(preimage, pubKey), nil
+}
+
+func (p *Pset) validateTapscriptSig(inIndex int, genesisBlockHash *chainhash.Hash, tapscriptSig *TaprootScriptSpendSig) (bool, error) {
+	if tapscriptSig == nil {
+		return false, errors.New("tapscriptSig is nil")
+	}
+
+	leaf, err := chainhash.NewHash(tapscriptSig.LeafHash)
+	if err != nil {
+		return false, err
+	}
+
+	preimage, err := p.GetTaprootPreimage(inIndex, genesisBlockHash, leaf)
+	if err != nil {
+		return false, err
+	}
+
+	sig, err := schnorr.ParseSignature(tapscriptSig.Signature)
+	if err != nil {
+		return false, err
+	}
+
+	pubkey, err := schnorr.ParsePubKey(tapscriptSig.XOnlyPubKey)
+	if err != nil {
+		return false, err
+	}
+
+	return sig.Verify(preimage, pubkey), nil
+}
+
+func (p *Pset) GetTaprootPreimage(
+	inIndex int, genesisBlockHash, leafHash *chainhash.Hash,
+) ([]byte, error) {
+	input := p.Inputs[inIndex]
+
+	hashType := txscript.SigHashDefault
+	if input.SigHashType != txscript.SigHashDefault {
+		hashType = input.SigHashType
+	}
+
+	var scripts, assets, values [][]byte
+	for _, input := range p.Inputs {
+		script, asset, value, err := input.getPrevoutScriptAssetValue()
+		if err != nil {
+			return nil, err
+		}
+
+		scripts = append(scripts, script)
+		assets = append(assets, asset)
+		values = append(values, value)
+	}
+
+	unsignedTx, err := p.UnsignedTx()
+	if err != nil {
+		return nil, err
+	}
+
+	preimage := unsignedTx.HashForWitnessV1(
+		inIndex,
+		scripts,
+		assets,
+		values,
+		hashType,
+		genesisBlockHash,
+		leafHash,
+		nil,
+	)
+
+	return preimage[:], nil
 }
 
 func (p *Pset) getHashAndScriptForSignature(

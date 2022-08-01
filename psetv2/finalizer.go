@@ -12,9 +12,11 @@ package psetv2
 // multisig and no other custom script.
 
 import (
+	"bytes"
 	"fmt"
 
 	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 )
 
 var (
@@ -56,8 +58,17 @@ func Finalize(p *Pset, inIndex int) error {
 	// witness or legacy UTXO.
 	switch {
 	case input.WitnessUtxo != nil:
-		if err := finalizeWitnessInput(p, inIndex); err != nil {
-			return err
+		pkScript := input.WitnessUtxo.Script
+		switch {
+		case txscript.IsPayToTaproot(pkScript):
+			if err := finalizeTaprootInput(p, inIndex); err != nil {
+				return err
+			}
+
+		default:
+			if err := finalizeWitnessInput(p, inIndex); err != nil {
+				return err
+			}
 		}
 	case input.NonWitnessUtxo != nil:
 		if err := finalizeNonWitnessInput(p, inIndex); err != nil {
@@ -123,12 +134,17 @@ func isFinalizableWitnessInput(input *Input) bool {
 	// If this is a native witness output, then we require both
 	// the witness script, but not a redeem script.
 	case txscript.IsWitnessProgram(pkScript):
-		if txscript.IsPayToWitnessScriptHash(pkScript) {
+		switch {
+		case txscript.IsPayToWitnessScriptHash(pkScript):
 			if len(input.WitnessScript) == 0 ||
 				len(input.RedeemScript) > 0 {
 				return false
 			}
-		} else {
+		case txscript.IsPayToTaproot(pkScript):
+			if input.TaprootKeySpendSig == nil && len(input.TaprootScriptSpendSig) == 0 {
+				return false
+			}
+		default:
 			// A P2WKH output on the other hand doesn't need
 			// neither a witnessScript or redeemScript.
 			if len(input.WitnessScript) > 0 ||
@@ -136,7 +152,6 @@ func isFinalizableWitnessInput(input *Input) bool {
 				return false
 			}
 		}
-
 	// For nested P2SH inputs, we verify that a witness script is known.
 	case txscript.IsPayToScriptHash(pkScript):
 		if len(input.RedeemScript) == 0 {
@@ -198,7 +213,7 @@ func isFinalizable(p *Pset, inIndex int) bool {
 	input := p.Inputs[inIndex]
 
 	// The input cannot be finalized without any signatures
-	if len(input.PartialSigs) == 0 {
+	if len(input.PartialSigs) == 0 && input.TaprootKeySpendSig == nil && len(input.TaprootScriptSpendSig) == 0 {
 		return false
 	}
 
@@ -467,5 +482,95 @@ func finalizeWitnessInput(p *Pset, inIndex int) error {
 	if len(serializedWitness) > 0 {
 		p.Inputs[inIndex].FinalScriptWitness = serializedWitness
 	}
+	return nil
+}
+
+// finalizeTaprootInput attempts to create PsbtInFinalScriptWitness field for
+// input at index inIndex, and removes all other fields except for the utxo
+// field, for an input of type p2tr, or returns an error.
+func finalizeTaprootInput(p *Pset, inIndex int) error {
+	// If this input has already been finalized, then we'll return an error
+	// as we can't proceed.
+	if checkFinalScriptSigWitness(p, inIndex) {
+		return ErrInputIsFinalized
+	}
+
+	// Any p2tr input will only have a witness script, no sig script.
+	var (
+		serializedWitness []byte
+		err               error
+		pInput            = &p.Inputs[inIndex]
+	)
+
+	// What spend path did we take?
+	switch {
+	// Key spend path.
+	case len(pInput.TaprootKeySpendSig) > 0:
+		serializedWitness, err = writeTxWitness(pInput.TaprootKeySpendSig)
+
+	// Script spend path.
+	case len(pInput.TaprootScriptSpendSig) > 0:
+		var witnessStack wire.TxWitness
+
+		// If there are multiple script spend signatures, we assume they
+		// are from multiple signing participants for the same leaf
+		// script that uses OP_CHECKSIGADD for multi-sig. Signing
+		// multiple possible execution paths at the same time is
+		// currently not supported by this library.
+		targetLeafHash := pInput.TaprootScriptSpendSig[0].LeafHash
+		leafScript, err := FindLeafScript(pInput, targetLeafHash)
+		if err != nil {
+			return fmt.Errorf("control block for script spend " +
+				"signature not found")
+		}
+
+		// The witness stack will contain all signatures, followed by
+		// the script itself and then the control block.
+		for idx, scriptSpendSig := range pInput.TaprootScriptSpendSig {
+			// Make sure that if there are indeed multiple
+			// signatures, they all reference the same leaf hash.
+			if !bytes.Equal(scriptSpendSig.LeafHash, targetLeafHash) {
+				return fmt.Errorf("script spend signature %d "+
+					"references different target leaf "+
+					"hash than first signature; only one "+
+					"script path is supported", idx)
+			}
+
+			sig := append([]byte{}, scriptSpendSig.Signature...)
+			if scriptSpendSig.SigHash != txscript.SigHashDefault {
+				sig = append(sig, byte(scriptSpendSig.SigHash))
+			}
+			witnessStack = append(witnessStack, sig)
+		}
+
+		// Complete the witness stack with the executed script and the
+		// serialized control block.
+		witnessStack = append(witnessStack, leafScript.Script)
+		witnessStack = append(witnessStack, leafScript.ControlBlock)
+
+		serializedWitness, err = writeTxWitness(witnessStack...)
+		if err != nil {
+			return err
+		}
+
+	default:
+		return ErrInvalidPsbtFormat
+	}
+	if err != nil {
+		return err
+	}
+
+	// At this point, a witness has been constructed. Remove all fields
+	// other than witness utxo & finalscriptwitness.
+	newInput := &Input{
+		PreviousTxid:       pInput.PreviousTxid,
+		PreviousTxIndex:    pInput.PreviousTxIndex,
+		WitnessUtxo:        pInput.WitnessUtxo,
+		FinalScriptWitness: serializedWitness,
+	}
+
+	// Finally, we overwrite the entry in the input list at the correct
+	// index.
+	p.Inputs[inIndex] = *newInput
 	return nil
 }

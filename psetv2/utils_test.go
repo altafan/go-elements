@@ -234,7 +234,7 @@ func signTransaction(
 		}
 	}
 
-	valid, err := p.ValidateAllSignatures()
+	valid, err := p.ValidateAllSignatures(nil)
 	if err != nil {
 		return err
 	}
@@ -297,7 +297,7 @@ func signInput(
 		return err
 	}
 
-	valid, err := p.ValidateInputSignatures(inIndex)
+	valid, err := p.ValidateInputSignatures(inIndex, nil)
 	if err != nil {
 		return err
 	}

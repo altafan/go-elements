@@ -18,6 +18,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/vulpemventures/go-elements/address"
 	"github.com/vulpemventures/go-elements/elementsutil"
 	"github.com/vulpemventures/go-elements/network"
@@ -183,6 +184,11 @@ func TestTapscriptSpend(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	internalPrivKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	internalPubKey := internalPrivKey.PubKey()
+
 	blindingKey, err := btcec.NewPrivateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -195,7 +201,7 @@ func TestTapscriptSpend(t *testing.T) {
 
 	tree := taproot.AssembleTaprootScriptTree(taproot.NewBaseTapElementsLeaf(checksigSchnorrScript))
 
-	taprootPay, err := payment.FromTaprootScriptTree(privateKey.PubKey(), tree, &network.Regtest, blindingKey.PubKey())
+	taprootPay, err := payment.FromTaprootScriptTree(internalPubKey, tree, &network.Regtest, blindingKey.PubKey())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +319,7 @@ func TestTapscriptSpend(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	controlBlock := leafProof.ToControlBlock(privateKey.PubKey())
+	controlBlock := leafProof.ToControlBlock(internalPubKey)
 	controlBlockBytes, err := controlBlock.ToBytes()
 	if err != nil {
 		t.Fatal(err)
