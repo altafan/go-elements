@@ -128,12 +128,8 @@ func (p *Pset) HasSighashSingle() bool {
 }
 
 func (p *Pset) NeedsBlinding() bool {
-	if p.Global.Modifiable != nil {
-		return p.Global.Modifiable.Test(0)
-	}
-
 	for _, out := range p.Outputs {
-		if out.IsBlinded() && !out.IsFullyBlinded() {
+		if out.NeedsBlinding() && !out.IsFullyBlinded() {
 			return true
 		}
 	}
@@ -144,11 +140,8 @@ func (p *Pset) IsFullyBlinded() bool {
 	if !p.NeedsBlinding() {
 		return false
 	}
-	if p.Global.Modifiable != nil {
-		return !p.Global.Modifiable.Test(0)
-	}
 	for _, out := range p.Outputs {
-		if out.IsBlinded() && !out.IsFullyBlinded() {
+		if out.NeedsBlinding() && !out.IsFullyBlinded() {
 			return false
 		}
 	}
@@ -187,7 +180,11 @@ func (p *Pset) Locktime() uint32 {
 		return timeLocktime
 	}
 
-	return p.Global.FallbackLocktime
+	var locktime uint32
+	if p.Global.FallbackLocktime != nil {
+		locktime = *p.Global.FallbackLocktime
+	}
+	return locktime
 }
 
 func (p *Pset) SanityCheck() error {
@@ -349,7 +346,10 @@ func (p *Pset) addInput(in Input) error {
 				hasSigs = true
 			}
 		}
-		newLocktime := p.Global.FallbackLocktime
+		var newLocktime uint32
+		if p.Global.FallbackLocktime != nil {
+			newLocktime = *p.Global.FallbackLocktime
+		}
 		if timeLocktime != 0 {
 			newLocktime = timeLocktime
 		}
@@ -376,9 +376,7 @@ func (p *Pset) addOutput(out Output) error {
 
 	p.Outputs = append(p.Outputs, out)
 	p.Global.OutputCount++
-	if out.IsBlinded() {
-		p.Global.Modifiable.Set(0)
-	}
+
 	return nil
 }
 

@@ -320,7 +320,7 @@ func (u *Updater) AddInIssuance(arg AddInIssuanceArgs) error {
 		Address: arg.AssetAddress,
 	}
 	out := issuanceOut.toPartialOutput()
-	if out.IsBlinded() {
+	if out.NeedsBlinding() {
 		inIndex := uint32(inputIndex)
 		out.BlinderIndex = inIndex
 	}
@@ -338,7 +338,7 @@ func (u *Updater) AddInIssuance(arg AddInIssuanceArgs) error {
 			Address: arg.TokenAddress,
 		}
 		out := tokenOut.toPartialOutput()
-		if out.IsBlinded() {
+		if out.NeedsBlinding() {
 			inIndex := uint32(inputIndex)
 			out.BlinderIndex = inIndex
 		}
@@ -501,7 +501,7 @@ func (u *Updater) AddInReissuance(arg AddInReissuanceArgs) error {
 		Address: arg.AssetAddress,
 	}
 	out := reissuanceOut.toPartialOutput()
-	if out.IsBlinded() {
+	if out.NeedsBlinding() {
 		out.BlinderIndex = arg.TokenPrevOut.TxIndex
 	}
 	if err := p.addOutput(out); err != nil {
@@ -519,7 +519,7 @@ func (u *Updater) AddInReissuance(arg AddInReissuanceArgs) error {
 		Address: arg.TokenAddress,
 	}
 	out = tokenOut.toPartialOutput()
-	if out.IsBlinded() {
+	if out.NeedsBlinding() {
 		out.BlinderIndex = arg.TokenPrevOut.TxIndex
 	}
 	if err := p.addOutput(out); err != nil {

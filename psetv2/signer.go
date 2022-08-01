@@ -57,7 +57,7 @@ func (s *Signer) SignInput(
 
 	if (input.SigHashType & 0x1f) == txscript.SigHashAll {
 		for _, out := range p.Outputs {
-			if out.IsBlinded() && !out.IsFullyBlinded() {
+			if out.NeedsBlinding() && !out.IsFullyBlinded() {
 				return ErrSignerForbiddenSigning
 			}
 		}
@@ -158,7 +158,7 @@ func (s *Signer) SignTaprootInputKeyPath(inIndex int, sig, internalPubKey, merkl
 	hashType := input.SigHashType & 0x1f
 	if hashType == txscript.SigHashAll || hashType == txscript.SigHashDefault {
 		for _, out := range p.Outputs {
-			if out.IsBlinded() && !out.IsFullyBlinded() {
+			if out.NeedsBlinding() && !out.IsFullyBlinded() {
 				return ErrSignerForbiddenSigning
 			}
 		}
@@ -211,7 +211,7 @@ func (s *Signer) SignTaprootInputScriptPath(inIndex int, sig *TaprootScriptSpend
 	hashType := input.SigHashType & 0x1f
 	if hashType == txscript.SigHashAll || hashType == txscript.SigHashDefault {
 		for _, out := range p.Outputs {
-			if out.IsBlinded() && !out.IsFullyBlinded() {
+			if out.NeedsBlinding() && !out.IsFullyBlinded() {
 				return ErrSignerForbiddenSigning
 			}
 		}
