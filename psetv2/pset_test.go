@@ -3,6 +3,7 @@ package psetv2_test
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"testing"
 	"time"
@@ -820,6 +821,185 @@ func TestBroadcastBlindedSwapTx(t *testing.T) {
 	// Now that blinding is complete, both parties can sign the pset...
 	prvKeys := []*btcec.PrivateKey{alicePrivkey, bobPrivkey}
 	scripts := [][]byte{aliceP2wpkh.Script, bobP2wpkh.Script}
+	err = signTransaction(ptx, prvKeys, scripts, true, sighashAll, nil)
+	require.NoError(t, err)
+
+	// ...and broadcast the confidential swap tx to the network.
+	_, err = broadcastTransaction(ptx)
+	require.NoError(t, err)
+}
+
+func TestBroadcastTopupTx(t *testing.T) {
+	aliceBlindingPrivateKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	alicePrivkey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	aliceBlindingPublicKey := aliceBlindingPrivateKey.PubKey()
+	alicePubkey := alicePrivkey.PubKey()
+	aliceP2wpkh := payment.FromPublicKey(alicePubkey, &network.Regtest, aliceBlindingPublicKey)
+	aliceAddress, _ := aliceP2wpkh.ConfidentialWitnessPubKeyHash()
+
+	bobBlindingPrivateKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	bobPrivkey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	bobBlindingPublicKey := bobBlindingPrivateKey.PubKey()
+	bobPubkey := bobPrivkey.PubKey()
+	bobP2wpkh := payment.FromPublicKey(bobPubkey, &network.Regtest, bobBlindingPublicKey)
+	bobAddress, _ := bobP2wpkh.ConfidentialWitnessPubKeyHash()
+
+	// Send LBTC funds to alice's address.
+	_, err = faucet(aliceAddress)
+	require.NoError(t, err)
+
+	// Send USDT funds to bob's address.
+	_, usdt, err := mint(bobAddress, 1, "", "")
+	require.NoError(t, err)
+	time.Sleep(time.Second * 3)
+
+	// Retrieve alice's utxos.
+	aliceUtxos, err := unspents(aliceAddress)
+	require.NoError(t, err)
+
+	// Retrieve bob's utxos.
+	bobUtxos, err := unspents(bobAddress)
+	require.NoError(t, err)
+
+	bobPrevoutIndex := uint32(bobUtxos[0]["vout"].(float64))
+	bobPrevoutTxid := bobUtxos[0]["txid"].(string)
+
+	// Bob creates the transaction with his USDT inputs and outputs.
+	bobInputArgs := []psetv2.InputArgs{
+		{
+			TxIndex: bobPrevoutIndex,
+			Txid:    bobPrevoutTxid,
+		},
+	}
+
+	bobOutputArgs := []psetv2.OutputArgs{
+		{
+			Asset:        usdt,
+			Amount:       70000000,
+			Script:       h2b("00149c5cddb14274b2ccb79940aa37348ee227b703ae"),
+			BlindingKey:  h2b("034aad5c400b7378c6566abb8e4a4c33b844ccc1c4d99f2e141b187753ceb72919"),
+			BlinderIndex: 0,
+		},
+		{
+			Asset:        usdt,
+			Amount:       30000000,
+			Script:       bobP2wpkh.WitnessScript,
+			BlindingKey:  bobBlindingPublicKey.SerializeCompressed(),
+			BlinderIndex: 0,
+		},
+	}
+
+	ptx, err := psetv2.New(bobInputArgs, bobOutputArgs, nil)
+	require.NoError(t, err)
+
+	updater, err := psetv2.NewUpdater(ptx)
+	require.NoError(t, err)
+
+	bobPrevTxHex, err := fetchTx(bobUtxos[0]["txid"].(string))
+	require.NoError(t, err)
+
+	bobPrevTx, _ := transaction.NewTxFromHex(bobPrevTxHex)
+	bobWitnessUtxo := bobPrevTx.Outputs[bobPrevoutIndex]
+	err = updater.AddInWitnessUtxo(0, bobWitnessUtxo)
+	require.NoError(t, err)
+	err = updater.AddInUtxoRangeProof(0, bobWitnessUtxo.RangeProof)
+	require.NoError(t, err)
+
+	// Bob blinds the tx as non last blinder.
+	zkpValidator := confidential.NewZKPValidator()
+	zkpGenerator := confidential.NewZKPGeneratorFromBlindingKeys(
+		[][]byte{bobBlindingPrivateKey.Serialize()},
+		nil,
+	)
+
+	bobOwnedInputs, err := zkpGenerator.UnblindInputs(ptx, nil)
+	require.NoError(t, err)
+	bobOutputBlindingArgs, err := zkpGenerator.BlindOutputs(ptx, nil, nil)
+	require.NoError(t, err)
+
+	blinder, err := psetv2.NewBlinder(
+		ptx, bobOwnedInputs, zkpValidator, zkpGenerator,
+	)
+	require.NoError(t, err)
+
+	err = blinder.BlindNonLast(nil, bobOutputBlindingArgs)
+	require.NoError(t, err)
+
+	// Now it's alice's turn to add her LBTC input and outputs.
+	alicePrevoutIndex := uint32(aliceUtxos[0]["vout"].(float64))
+	alicePrevoutTxid := aliceUtxos[0]["txid"].(string)
+
+	aliceInputArgs := []psetv2.InputArgs{
+		{
+			Txid:    alicePrevoutTxid,
+			TxIndex: alicePrevoutIndex,
+		},
+	}
+
+	updater, err = psetv2.NewUpdater(ptx)
+	require.NoError(t, err)
+
+	err = updater.AddInputs(aliceInputArgs)
+	require.NoError(t, err)
+
+	aliceOutputBlinderIndex := uint32(1)
+	aliceOutputArgs := []psetv2.OutputArgs{
+		{
+			Asset:        lbtc,
+			Amount:       99999000,
+			Script:       aliceP2wpkh.WitnessScript,
+			BlindingKey:  aliceBlindingPublicKey.SerializeCompressed(),
+			BlinderIndex: aliceOutputBlinderIndex,
+		},
+		{
+			Asset:  lbtc,
+			Amount: 1000,
+		},
+	}
+
+	err = updater.AddOutputs(aliceOutputArgs)
+	require.NoError(t, err)
+
+	alicePrevTxHex, err := fetchTx(aliceUtxos[0]["txid"].(string))
+	require.NoError(t, err)
+
+	alicePrevTx, _ := transaction.NewTxFromHex(alicePrevTxHex)
+	aliceWitnessUtxo := alicePrevTx.Outputs[alicePrevoutIndex]
+	err = updater.AddInWitnessUtxo(1, aliceWitnessUtxo)
+	require.NoError(t, err)
+	err = updater.AddInUtxoRangeProof(1, aliceWitnessUtxo.RangeProof)
+	require.NoError(t, err)
+
+	// Alice blinds her outputs as last blinder.
+	zkpGenerator = confidential.NewZKPGeneratorFromBlindingKeys(
+		[][]byte{aliceBlindingPrivateKey.Serialize()}, nil,
+	)
+
+	aliceOwnedInputs, err := zkpGenerator.UnblindInputs(ptx, []uint32{1})
+	require.NoError(t, err)
+
+	aliceOutputBlindingArgs, err := zkpGenerator.BlindOutputs(ptx, []uint32{2}, nil)
+	require.NoError(t, err)
+
+	blinder, err = psetv2.NewBlinder(
+		ptx, aliceOwnedInputs, zkpValidator, zkpGenerator,
+	)
+	require.NoError(t, err)
+
+	err = blinder.BlindLast(nil, aliceOutputBlindingArgs)
+	require.NoError(t, err)
+
+	fmt.Println(ptx.ToBase64())
+
+	// Now that blinding is complete, both parties can sign the pset...
+	prvKeys := []*btcec.PrivateKey{bobPrivkey, alicePrivkey}
+	scripts := [][]byte{bobP2wpkh.Script, aliceP2wpkh.Script}
 	err = signTransaction(ptx, prvKeys, scripts, true, sighashAll, nil)
 	require.NoError(t, err)
 
