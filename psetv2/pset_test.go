@@ -3,7 +3,6 @@ package psetv2_test
 import (
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io/ioutil"
 	"testing"
 	"time"
@@ -959,44 +958,24 @@ func TestBroadcastTopupTx(t *testing.T) {
 	// Bob blinds the tx as non last blinder.
 	zkpValidator := confidential.NewZKPValidator()
 	zkpGenerator := confidential.NewZKPGeneratorFromBlindingKeys(
-		[][]byte{bobBlindingPrivateKey.Serialize()}, nil,
+		[][]byte{
+			bobBlindingPrivateKey.Serialize(),
+			aliceBlindingPrivateKey.Serialize(),
+		}, nil,
 	)
 
-	bobOwnedInputs, err := zkpGenerator.UnblindInputs(ptx, []uint32{0})
+	ownedInputs, err := zkpGenerator.UnblindInputs(ptx, nil)
 	require.NoError(t, err)
-	bobOutputBlindingArgs, err := zkpGenerator.BlindOutputs(
-		ptx, []uint32{0, 1}, nil,
-	)
+	outputBlindingArgs, err := zkpGenerator.BlindOutputs(ptx, nil, nil)
 	require.NoError(t, err)
 
 	blinder, err := psetv2.NewBlinder(
-		ptx, bobOwnedInputs, zkpValidator, zkpGenerator,
+		ptx, ownedInputs, zkpValidator, zkpGenerator,
 	)
 	require.NoError(t, err)
 
-	err = blinder.BlindNonLast(nil, bobOutputBlindingArgs)
+	err = blinder.BlindLast(nil, outputBlindingArgs)
 	require.NoError(t, err)
-
-	// Alice blinds her outputs as last blinder.
-	zkpGenerator = confidential.NewZKPGeneratorFromBlindingKeys(
-		[][]byte{aliceBlindingPrivateKey.Serialize()}, nil,
-	)
-
-	aliceOwnedInputs, err := zkpGenerator.UnblindInputs(ptx, []uint32{1})
-	require.NoError(t, err)
-
-	aliceOutputBlindingArgs, err := zkpGenerator.BlindOutputs(ptx, []uint32{2}, nil)
-	require.NoError(t, err)
-
-	blinder, err = psetv2.NewBlinder(
-		ptx, aliceOwnedInputs, zkpValidator, zkpGenerator,
-	)
-	require.NoError(t, err)
-
-	err = blinder.BlindLast(nil, aliceOutputBlindingArgs)
-	require.NoError(t, err)
-
-	fmt.Println(ptx.ToBase64())
 
 	// Now that blinding is complete, both parties can sign the pset...
 	prvKeys := []*btcec.PrivateKey{bobPrivkey, alicePrivkey}
