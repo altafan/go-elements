@@ -911,26 +911,6 @@ func TestBroadcastTopupTx(t *testing.T) {
 	err = updater.AddInUtxoRangeProof(0, bobWitnessUtxo.RangeProof)
 	require.NoError(t, err)
 
-	// Bob blinds the tx as non last blinder.
-	zkpValidator := confidential.NewZKPValidator()
-	zkpGenerator := confidential.NewZKPGeneratorFromBlindingKeys(
-		[][]byte{bobBlindingPrivateKey.Serialize()},
-		nil,
-	)
-
-	bobOwnedInputs, err := zkpGenerator.UnblindInputs(ptx, nil)
-	require.NoError(t, err)
-	bobOutputBlindingArgs, err := zkpGenerator.BlindOutputs(ptx, nil, nil)
-	require.NoError(t, err)
-
-	blinder, err := psetv2.NewBlinder(
-		ptx, bobOwnedInputs, zkpValidator, zkpGenerator,
-	)
-	require.NoError(t, err)
-
-	err = blinder.BlindNonLast(nil, bobOutputBlindingArgs)
-	require.NoError(t, err)
-
 	// Now it's alice's turn to add her LBTC input and outputs.
 	alicePrevoutIndex := uint32(aliceUtxos[0]["vout"].(float64))
 	alicePrevoutTxid := aliceUtxos[0]["txid"].(string)
@@ -974,6 +954,27 @@ func TestBroadcastTopupTx(t *testing.T) {
 	err = updater.AddInWitnessUtxo(1, aliceWitnessUtxo)
 	require.NoError(t, err)
 	err = updater.AddInUtxoRangeProof(1, aliceWitnessUtxo.RangeProof)
+	require.NoError(t, err)
+
+	// Bob blinds the tx as non last blinder.
+	zkpValidator := confidential.NewZKPValidator()
+	zkpGenerator := confidential.NewZKPGeneratorFromBlindingKeys(
+		[][]byte{bobBlindingPrivateKey.Serialize()}, nil,
+	)
+
+	bobOwnedInputs, err := zkpGenerator.UnblindInputs(ptx, []uint32{0})
+	require.NoError(t, err)
+	bobOutputBlindingArgs, err := zkpGenerator.BlindOutputs(
+		ptx, []uint32{0, 1}, nil,
+	)
+	require.NoError(t, err)
+
+	blinder, err := psetv2.NewBlinder(
+		ptx, bobOwnedInputs, zkpValidator, zkpGenerator,
+	)
+	require.NoError(t, err)
+
+	err = blinder.BlindNonLast(nil, bobOutputBlindingArgs)
 	require.NoError(t, err)
 
 	// Alice blinds her outputs as last blinder.
